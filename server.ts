@@ -237,9 +237,9 @@ function createAuditLogEntry(action: string, user: string, recordId: string | un
   }
 }
 
-// Lazy init Gemini client with proper user-agent headers
+// Lazy init Google AI client with proper user-agent headers
 let aiClient: GoogleGenAI | null = null;
-function getGeminiClient(): GoogleGenAI {
+function getGoogleAIClient(): GoogleGenAI {
   if (!aiClient) {
     aiClient = new GoogleGenAI({
       apiKey: process.env.GOOGLE_API_KEY || "",
@@ -259,7 +259,7 @@ function getGeminiClient(): GoogleGenAI {
 app.get("/api/status", async (req, res) => {
   const url = process.env.SUPABASE_URL;
   const anonKey = process.env.SUPABASE_ANON_KEY;
-  const geminiConfigured = !!process.env.GOOGLE_API_KEY;
+  const googleApiConfigured = !!process.env.GOOGLE_API_KEY;
   const isSupabaseConfigured = !!(url && anonKey);
 
   let schemaErrorInvoices = null;
@@ -292,7 +292,7 @@ app.get("/api/status", async (req, res) => {
     configured: isSupabaseConfigured,
     supabaseUrl: url || null,
     usingFallback: !isSupabaseConfigured || !!(schemaErrorInvoices || schemaErrorAuditLogs),
-    geminiConfigured,
+    geminiConfigured: googleApiConfigured,
     schemaErrorInvoices,
     schemaErrorAuditLogs
   });
@@ -481,7 +481,7 @@ function splitRawContent(content: string): string[] {
   return [content.trim()];
 }
 
-// Parse pasted data using Gemini AI Flash 3.5
+// Parse pasted data using Google AI API Flash 3.5
 app.post("/api/parse-raw", async (req, res) => {
   const { content, source } = req.body;
   if (!content || !content.trim()) {
@@ -491,7 +491,7 @@ app.post("/api/parse-raw", async (req, res) => {
   const userEmail = req.header("x-finance-user") || "yadagiri.fde9@gmail.com";
 
   try {
-    const ai = getGeminiClient();
+    const ai = getGoogleAIClient();
 
     const response = await ai.models.generateContent({
       model: "gemini-3.5-flash",
@@ -583,7 +583,7 @@ ${content}
     const cleanedJson = JSON.parse(textOutput.trim());
     return res.json(Array.isArray(cleanedJson) ? cleanedJson : [cleanedJson]);
   } catch (err: any) {
-    console.error("Gemini AI Parsing OCR issue:", err);
+    console.error("Google AI Parsing OCR issue:", err);
 
     // Fallback: simple heuristic matching that supports delimiters and multiple split records
     const chunks = splitRawContent(content);

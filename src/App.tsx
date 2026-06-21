@@ -127,7 +127,7 @@ export default function App() {
     setOriginalSource(src);
   };
 
-  // OCR Parsing via server-side Gemini API
+  // OCR Parsing via server-side Google API
   const handleParseOCRData = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!rawPastedText.trim()) return;
@@ -136,7 +136,7 @@ export default function App() {
     setParsingError(null);
 
     try {
-      // 1. Call Gemini parser
+      // 1. Call Google API parser
       const parseResponse = await fetch("/api/parse-raw", {
         method: "POST",
         headers: {
@@ -150,7 +150,7 @@ export default function App() {
       });
 
       if (!parseResponse.ok) {
-        throw new Error("Gemini receipt parsing api returned an error.");
+        throw new Error("Google receipt parsing api returned an error.");
       }
 
       const parsedData = await parseResponse.json();
@@ -510,10 +510,10 @@ export default function App() {
               <Info className="w-3.5 h-3.5 text-slate-450 hover:text-white" />
             </button>
 
-            {/* Gemini Parser Badge */}
+            {/* Google API Parser Badge */}
             <div className="bg-indigo-950/30 border border-indigo-850 text-indigo-400 p-2 rounded-lg flex items-center gap-2 font-mono">
               <Sparkles className="w-3.5 h-3.5" />
-              <span>Gemini OCR: Active</span>
+              <span>Google API: Active</span>
             </div>
 
             {/* Current Session Represent */}
@@ -630,7 +630,7 @@ export default function App() {
               </div>
 
               <p className="text-xs text-slate-400 mb-4 leading-relaxed">
-                Paste raw transaction text, vendor invoice email feeds, or message formats collected from Slack. Gemini AI automatically parses, cleans, extracts core line-items, and maps to tax departments.
+                Paste raw transaction text, vendor invoice email feeds, or message formats collected from Slack. Google AI automatically parses, cleans, extracts core line-items, and maps to tax departments.
               </p>
 
               {/* Demo Sample Presets */}
@@ -701,7 +701,7 @@ export default function App() {
                       {parsingState === "parsing" && (
                         <>
                           <RefreshCw className="w-4 h-4 animate-spin text-slate-950" />
-                          <span>Gemini Scanning...</span>
+                          <span>Google Scanning...</span>
                         </>
                       )}
                       {parsingState === "saving" && (
