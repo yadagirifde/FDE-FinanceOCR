@@ -1,5 +1,5 @@
 {
-  "name": "Finance OCR and Supabase Ledger",
+  "name": "Receipt / Invoice Parser",
   "description": "An automated invoice and receipt parser for Finance Heads featuring Gemini AI metadata extraction, in-table editing, rigorous audit logs, advanced reporting, and Supabase cloud persistence.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]

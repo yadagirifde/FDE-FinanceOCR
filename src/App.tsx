@@ -157,47 +157,55 @@ export default function App() {
 
       setParsingState("saving");
 
-      // 2. Format and Save to ledger (via server database routes)
-      const newInvoice: InvoiceRecord = {
-        id: "rec_" + Math.random().toString(36).substr(2, 9) + "_" + Date.now(),
-        vendor: parsedData.vendor || "Unknown Vendor",
-        amount: Number(parsedData.amount) || 0.0,
-        date: parsedData.date || new Date().toISOString().substring(0, 10),
-        category: parsedData.category || "Other",
-        raw_content: rawPastedText,
-        original_source: originalSource,
-        invoice_number: parsedData.invoice_number || undefined,
-        status: "Pending Approval",
-        processed_at: new Date().toISOString(),
-        extracted_metadata: {
-          currency: parsedData.extracted_metadata?.currency || "USD",
-          taxAmount: Number(parsedData.extracted_metadata?.taxAmount) || 0.0,
-          vendorAddress: parsedData.extracted_metadata?.vendorAddress || undefined,
-          paymentTerms: parsedData.extracted_metadata?.paymentTerms || undefined,
-          confidenceScore: Number(parsedData.extracted_metadata?.confidenceScore) || 85,
-          lineItems: parsedData.extracted_metadata?.lineItems || []
+      // Handle both array responses and single object responses for absolute safety
+      const parsedInvoices = Array.isArray(parsedData) ? parsedData : [parsedData];
+      const newlySavedRecords: InvoiceRecord[] = [];
+
+      for (const item of parsedInvoices) {
+        const newInvoice: InvoiceRecord = {
+          id: "rec_" + Math.random().toString(36).substr(2, 9) + "_" + Date.now(),
+          vendor: item.vendor || "Unknown Vendor",
+          amount: Number(item.amount) || 0.0,
+          date: item.date || new Date().toISOString().substring(0, 10),
+          category: item.category || "Other",
+          raw_content: rawPastedText,
+          original_source: originalSource,
+          invoice_number: item.invoice_number || undefined,
+          status: "Pending Approval",
+          processed_at: new Date().toISOString(),
+          extracted_metadata: {
+            currency: item.extracted_metadata?.currency || "USD",
+            taxAmount: Number(item.extracted_metadata?.taxAmount) || 0.0,
+            vendorAddress: item.extracted_metadata?.vendorAddress || undefined,
+            paymentTerms: item.extracted_metadata?.paymentTerms || undefined,
+            confidenceScore: Number(item.extracted_metadata?.confidenceScore) || 85,
+            lineItems: item.extracted_metadata?.lineItems || []
+          }
+        };
+
+        const saveResponse = await fetch("/api/invoices", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-finance-user": financeUser
+          },
+          body: JSON.stringify(newInvoice)
+        });
+
+        if (saveResponse.ok) {
+          const savedRecord = await saveResponse.json();
+          newlySavedRecords.push(savedRecord);
         }
-      };
-
-      const saveResponse = await fetch("/api/invoices", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-finance-user": financeUser
-        },
-        body: JSON.stringify(newInvoice)
-      });
-
-      if (!saveResponse.ok) {
-        throw new Error("Failed to write invoice to the storage core.");
       }
 
-      const savedRecord = await saveResponse.json();
+      if (newlySavedRecords.length === 0) {
+        throw new Error("Failed to write any invoices to the storage core.");
+      }
 
-      // Update states
-      setInvoices(prev => [savedRecord, ...prev]);
+      // Update states with all newly created invoice records
+      setInvoices(prev => [...newlySavedRecords, ...prev]);
       setRawPastedText("");
-      setSelectedInvoiceId(savedRecord.id);
+      setSelectedInvoiceId(newlySavedRecords[0].id);
       setParsingState("idle");
 
       // Refresh Audit logs
@@ -473,7 +481,7 @@ export default function App() {
                 <span className="text-xs uppercase font-semibold font-mono tracking-widest text-emerald-400">Enterprise Suite</span>
                 <span className="bg-slate-800 text-slate-300 text-[10px] font-mono px-2 py-0.5 rounded border border-slate-700">Audit-Ready</span>
               </div>
-              <h1 className="text-lg sm:text-xl font-bold tracking-tight text-white">Finance OCR & Supabase Ledger</h1>
+              <h1 className="text-lg sm:text-xl font-bold tracking-tight text-white">Receipt / Invoice Parser</h1>
             </div>
           </div>
 

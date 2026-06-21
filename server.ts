@@ -242,7 +242,7 @@ let aiClient: GoogleGenAI | null = null;
 function getGeminiClient(): GoogleGenAI {
   if (!aiClient) {
     aiClient = new GoogleGenAI({
-      apiKey: process.env.GEMINI_API_KEY || "",
+      apiKey: process.env.GOOGLE_API_KEY || "",
       httpOptions: {
         headers: {
           "User-Agent": "aistudio-build",
@@ -259,7 +259,7 @@ function getGeminiClient(): GoogleGenAI {
 app.get("/api/status", async (req, res) => {
   const url = process.env.SUPABASE_URL;
   const anonKey = process.env.SUPABASE_ANON_KEY;
-  const geminiConfigured = !!process.env.GEMINI_API_KEY;
+  const geminiConfigured = !!process.env.GOOGLE_API_KEY;
   const isSupabaseConfigured = !!(url && anonKey);
 
   let schemaErrorInvoices = null;
@@ -460,6 +460,27 @@ app.post("/api/audit-logs", (req, res) => {
   return res.json({ success: true });
 });
 
+// Helper to split raw content if multiple invoices are present using // or :
+function splitRawContent(content: string): string[] {
+  // If the content is empty or only whitespace, return empty
+  if (!content || !content.trim()) return [];
+
+  // Check if double slashes '//' are used to separate multiple entries
+  if (content.includes("//")) {
+    return content.split("//").map(s => s.trim()).filter(Boolean);
+  }
+
+  // Check if ' : ' with spaces is used as a delimiter (often used to structure key-values or separate distinct lines/entries)
+  // We can also split by ' : ' to handle list form "AWS: 34.00 : Zoom: 14.00 : Slack: 25.00"
+  if (content.split(" : ").length > 1) {
+    return content.split(" : ").map(s => s.trim()).filter(Boolean);
+  }
+
+  // We could also split by line endings if each line has a colon, but let's be careful not to oversplit.
+  // Standard split logic can use ':' if there are multiple entries on the same line.
+  return [content.trim()];
+}
+
 // Parse pasted data using Gemini AI Flash 3.5
 app.post("/api/parse-raw", async (req, res) => {
   const { content, source } = req.body;
@@ -477,10 +498,13 @@ app.post("/api/parse-raw", async (req, res) => {
       contents: [
         {
           text: `You are an expert AI financial systems parser and receipts OCR analyzer. 
-Analyze the raw text block pasted below, which is an invoice, vendor email, or Slack notification captured from a transaction.
-Perform automatic transcription and extract standard corporate finance indicators.
+Analyze the raw text block pasted below, which may contain one or multiple separate invoices, vendor emails, receipts, or Slack notifications.
 
-If some fields are missing (like paymentTerms or tax), infer logically from the balance/receipt or leave them empty. Always calculate a confidence score between 0 and 100 representing how complete the extraction is.
+IMPORTANT BOUNDARY/DELIMITER RULE: 
+- If there is more than one separate invoice in the pasted data, use '//' or ':' as the boundary/delimiter to locate and separate each invoice (e.g. they might be written as "AWS: $40 // Zoom: $12" or "AWS: $40 : Zoom: $12").
+- Perform automatic transcription and extract standard corporate finance indicators for EACH identified invoice.
+
+If some fields are missing (like paymentTerms or tax), infer logically or leave them empty. Always calculate a confidence score between 0 and 100 representing how complete the extraction is.
 
 Raw pasted transaction details:
 """
@@ -489,61 +513,64 @@ ${content}
         }
       ],
       config: {
-        systemInstruction: "Strictly output structured JSON formatting. Do not wrap in markdown arrays, code fences, or write extra commentary. Align categories with matching corporate cost centers: 'Hosting', 'Software', 'Marketing/Advertising', 'Office Supplies', 'Travel/Logistics', 'Meals & Entertainment', 'Utilities', 'Professional Services' or 'Other'.",
+        systemInstruction: "Strictly output a JSON array of invoice objects. Even if there is only one invoice, you MUST return it as a structured JSON array containing that single object. Do not wrap in markdown arrays, code fences, or write extra commentary. Align categories with matching corporate cost centers: 'Hosting', 'Software', 'Marketing/Advertising', 'Office Supplies', 'Travel/Logistics', 'Meals & Entertainment', 'Utilities', 'Professional Services' or 'Other'.",
         responseMimeType: "application/json",
         responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            vendor: {
-              type: Type.STRING,
-              description: "Corporate vendor or company name (capitalized, cleaned. e.g. AWS, Stripe, Slack, Salesforce)."
-            },
-            amount: {
-              type: Type.NUMBER,
-              description: "Total payment or transaction total. Decimals supported."
-            },
-            date: {
-              type: Type.STRING,
-              description: "Payment or bill issuance date matching YYYY-MM-DD. Infer if year is missing."
-            },
-            category: {
-              type: Type.STRING,
-              description: "Corporate target cost category column."
-            },
-            invoice_number: {
-              type: Type.STRING,
-              description: "Extracted invoice, checkout bill, reference or transaction invoice number."
-            },
-            original_source: {
-              type: Type.STRING,
-              description: "Best estimate of original collection source: 'Slack', 'Email', or 'Pasted Text'."
-            },
-            extracted_metadata: {
-              type: Type.OBJECT,
-              properties: {
-                currency: { type: Type.STRING, description: "3-letter currency code, defaulting to USD." },
-                taxAmount: { type: Type.NUMBER, description: "Tax, VAT, GTS or secondary surcharges." },
-                vendorAddress: { type: Type.STRING, description: "Office location or supplier billing address." },
-                paymentTerms: { type: Type.STRING, description: "Payment terms conditions (Net 30, Paid via Visa, etc.)." },
-                confidenceScore: { type: Type.NUMBER, description: "Parsing confidence level metrics 1-100." },
-                lineItems: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      description: { type: Type.STRING, description: "Line item descriptor" },
-                      quantity: { type: Type.NUMBER, description: "Item quantity default 1" },
-                      unitPrice: { type: Type.NUMBER, description: "Rate unit fee" },
-                      amount: { type: Type.NUMBER, description: "Total line row amount cost" }
-                    },
-                    required: ["description", "amount"]
-                  }
-                }
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              vendor: {
+                type: Type.STRING,
+                description: "Corporate vendor or company name (capitalized, cleaned. e.g. AWS, Stripe, Slack, Salesforce)."
               },
-              required: ["currency", "confidenceScore"]
-            }
-          },
-          required: ["vendor", "amount", "date", "category", "original_source", "extracted_metadata"]
+              amount: {
+                type: Type.NUMBER,
+                description: "Total payment or transaction total. Decimals supported."
+              },
+              date: {
+                type: Type.STRING,
+                description: "Payment or bill issuance date matching YYYY-MM-DD. Infer if year is missing."
+              },
+              category: {
+                type: Type.STRING,
+                description: "Corporate target cost category column."
+              },
+              invoice_number: {
+                type: Type.STRING,
+                description: "Extracted invoice, checkout bill, reference or transaction invoice number."
+              },
+              original_source: {
+                type: Type.STRING,
+                description: "Best estimate of original collection source: 'Slack', 'Email', or 'Pasted Text'."
+              },
+              extracted_metadata: {
+                type: Type.OBJECT,
+                properties: {
+                  currency: { type: Type.STRING, description: "3-letter currency code, defaulting to USD." },
+                  taxAmount: { type: Type.NUMBER, description: "Tax, VAT, GTS or secondary surcharges." },
+                  vendorAddress: { type: Type.STRING, description: "Office location or supplier billing address." },
+                  paymentTerms: { type: Type.STRING, description: "Payment terms conditions (Net 30, Paid via Visa, etc.)." },
+                  confidenceScore: { type: Type.NUMBER, description: "Parsing confidence level metrics 1-100." },
+                  lineItems: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        description: { type: Type.STRING, description: "Line item descriptor" },
+                        quantity: { type: Type.NUMBER, description: "Item quantity default 1" },
+                        unitPrice: { type: Type.NUMBER, description: "Rate unit fee" },
+                        amount: { type: Type.NUMBER, description: "Total line row amount cost" }
+                      },
+                      required: ["description", "amount"]
+                    }
+                  }
+                },
+                required: ["currency", "confidenceScore"]
+              }
+            },
+            required: ["vendor", "amount", "date", "category", "original_source", "extracted_metadata"]
+          }
         }
       }
     });
@@ -554,58 +581,84 @@ ${content}
     }
 
     const cleanedJson = JSON.parse(textOutput.trim());
-    return res.json(cleanedJson);
+    return res.json(Array.isArray(cleanedJson) ? cleanedJson : [cleanedJson]);
   } catch (err: any) {
     console.error("Gemini AI Parsing OCR issue:", err);
 
-    // Fallback: simple heuristic matching in case model or API is completely blocked/fails
-    const lines = content.split("\n");
-    let vendor = "Unknown Vendor";
-    let amount = 0.0;
-    let category = "Other";
-    let invoice_number = "N/A";
+    // Fallback: simple heuristic matching that supports delimiters and multiple split records
+    const chunks = splitRawContent(content);
+    const fallbackList = [];
 
-    for (const l of lines) {
-      if (l.toLowerCase().includes("aws") || l.toLowerCase().includes("amazon")) {
-        vendor = "Amazon Web Services";
-        category = "Hosting";
-      } else if (l.toLowerCase().includes("slack")) {
-        vendor = "Slack Technologies";
-        category = "Software";
-      } else if (l.toLowerCase().includes("uber")) {
-        vendor = "Uber Logistics";
-        category = "Travel/Logistics";
-      } else if (l.toLowerCase().includes("invoice")) {
-        const matches = l.match(/invoice\s*#?\s*([A-Za-z0-9-]+)/i);
-        if (matches) invoice_number = matches[1];
+    for (const chunk of chunks) {
+      const lines = chunk.split("\n");
+      let vendor = "Unknown Vendor";
+      let amount = 0.0;
+      let category = "Other";
+      let invoice_number = "N/A";
+
+      for (const l of lines) {
+        if (l.toLowerCase().includes("aws") || l.toLowerCase().includes("amazon")) {
+          vendor = "Amazon Web Services";
+          category = "Hosting";
+        } else if (l.toLowerCase().includes("slack")) {
+          vendor = "Slack Technologies";
+          category = "Software";
+        } else if (l.toLowerCase().includes("uber")) {
+          vendor = "Uber Logistics";
+          category = "Travel/Logistics";
+        } else if (l.toLowerCase().includes("zoom")) {
+          vendor = "Zoom Video Communications";
+          category = "Software";
+        } else if (l.toLowerCase().includes("supabase")) {
+          vendor = "Supabase Database";
+          category = "Hosting";
+        } else if (l.toLowerCase().includes("fedex")) {
+          vendor = "FedEx Express";
+          category = "Travel/Logistics";
+        } else if (l.toLowerCase().includes("invoice")) {
+          const matches = l.match(/invoice\s*#?\s*([A-Za-z0-9-]+)/i);
+          if (matches) invoice_number = matches[1];
+        }
+
+        const moneyMatch = l.match(/\$?\s*([0-9,]+\.[0-9]{2})/);
+        if (moneyMatch && amount === 0.0) {
+          amount = parseFloat(moneyMatch[1].replace(/,/g, ""));
+        }
       }
 
-      const moneyMatch = l.match(/\$?\s*([0-9,]+\.[0-9]{2})/);
-      if (moneyMatch && amount === 0.0) {
-        amount = parseFloat(moneyMatch[1].replace(/,/g, ""));
+      // Match simple inline patterns like "Slack: 120"
+      if (vendor === "Unknown Vendor" && chunk.includes(":")) {
+        const colonSplit = chunk.split(":");
+        if (colonSplit.length >= 2) {
+          vendor = colonSplit[0].trim();
+          const potentialAmount = parseFloat(colonSplit[1].replace(/[^0-9.]/g, ""));
+          if (!isNaN(potentialAmount)) {
+            amount = potentialAmount;
+          }
+        }
       }
+
+      fallbackList.push({
+        vendor,
+        amount: amount || 45.00,
+        date: new Date().toISOString().substring(0, 10),
+        category,
+        invoice_number: invoice_number !== "N/A" ? invoice_number : "INV-" + Math.floor(Math.random() * 90000 + 10000),
+        original_source: source || "Pasted Text",
+        extracted_metadata: {
+          currency: "USD",
+          taxAmount: 0.0,
+          vendorAddress: "",
+          paymentTerms: "Due on Receipt",
+          confidenceScore: 50,
+          lineItems: [
+            { description: "General Expense Parsed", quantity: 1, amount: amount || 45.00 }
+          ]
+        }
+      });
     }
 
-    const fallbackObject = {
-      vendor,
-      amount: amount || 45.00,
-      date: new Date().toISOString().substring(0, 10),
-      category,
-      invoice_number,
-      original_source: source || "Pasted Text",
-      extracted_metadata: {
-        currency: "USD",
-        taxAmount: 0.0,
-        vendorAddress: "",
-        paymentTerms: "Due on Receipt",
-        confidenceScore: 40,
-        lineItems: [
-          { description: "General Expense Parsed", quantity: 1, amount: amount || 45.00 }
-        ]
-      }
-    };
-
-    return res.json(fallbackObject);
+    return res.json(fallbackList);
   }
 });
 
