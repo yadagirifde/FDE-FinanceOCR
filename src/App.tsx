@@ -26,75 +26,10 @@ import {
   Info
 } from "lucide-react";
 import { InvoiceRecord, AuditLog, SupabaseConfigStatus } from "./types";
+import { createClient } from "@supabase/supabase-js";
 
 // Seeded local fallbacks for offline support or static environments like Vercel
-const SEEDED_INVOICES: InvoiceRecord[] = [
-  {
-    id: "rec_seeded_1",
-    vendor: "Zoom Video Communications",
-    amount: 149.90,
-    date: "2026-06-19",
-    category: "Software",
-    raw_content: "@finance-bot Slack Billing Bridge: Zoom Video Communications Inc.\nTransaction Reference: ZM-89104-2026\nCharge Date: June 19, 2026\nAmount: $149.90 USD\nLicense Category: Enterprise Pro Video Suite (15 active seats)\nStatus: Approved automatically by team lead.",
-    original_source: "Slack",
-    invoice_number: "ZM-89104-2026",
-    status: "Pending Approval",
-    processed_at: "2026-06-19T10:00:00Z",
-    extracted_metadata: {
-      currency: "USD",
-      taxAmount: 0.0,
-      paymentTerms: "Due on Receipt",
-      confidenceScore: 92,
-      lineItems: [
-        { description: "Enterprise Pro Video Suite (15 active seats)", quantity: 1, amount: 149.90 }
-      ]
-    }
-  },
-  {
-    id: "rec_seeded_2",
-    vendor: "Supabase Database",
-    amount: 74.75,
-    date: "2026-06-17",
-    category: "Hosting",
-    raw_content: "From: Supabase Support <billing@supabase.co>\nTo: yadagiri.fde9@gmail.com\nSubject: Your Monthly Invoice INV-SUB-2026-9081\nDate: June 17, 2026\nItems:\n- Team Tier Organization Subscription: $25.00\n- Overages (Database Storage 40GB): $10.00\n- Compute Add-on (Small instance): $30.00\nSubtotal: $65.00\nTax VAT (15%): $9.75\nGrand Total: $74.75 USD charged to Visa card ending in *9011.",
-    original_source: "Email",
-    invoice_number: "INV-SUB-2026-9081",
-    status: "Approved",
-    processed_at: "2026-06-17T14:32:00Z",
-    extracted_metadata: {
-      currency: "USD",
-      taxAmount: 9.75,
-      paymentTerms: "Net 15 days",
-      confidenceScore: 95,
-      lineItems: [
-        { description: "Team Tier Organization Subscription", quantity: 1, amount: 25.00 },
-        { description: "Overages (Database Storage 40GB)", quantity: 1, amount: 10.00 },
-        { description: "Compute Add-on (Small instance)", quantity: 1, amount: 30.00 }
-      ]
-    }
-  },
-  {
-    id: "rec_seeded_3",
-    vendor: "FedEx Express Office",
-    amount: 45.20,
-    date: "2026-06-12",
-    category: "Travel/Logistics",
-    raw_content: "FEDEX EXPRESS OFFICE INVOICE\nBill Date: June 12, 2026\nTracking #90218-A\nVendor: FedEx Ground Express\nInternal PO: PO-90821-XP\nCategory: Shipping/Freight Logistics\nTotal Charge due: $45.20\nPayment Terms: Due Net 15 days.",
-    original_source: "Pasted Text",
-    invoice_number: "INV-PO-90821-XP",
-    status: "Pending Approval",
-    processed_at: "2026-06-12T09:15:00Z",
-    extracted_metadata: {
-      currency: "USD",
-      taxAmount: 0.0,
-      paymentTerms: "Net 15 days",
-      confidenceScore: 88,
-      lineItems: [
-        { description: "FedEx Ground Express shipping", quantity: 1, amount: 45.20 }
-      ]
-    }
-  }
-];
+const SEEDED_INVOICES: InvoiceRecord[] = [];
 
 function splitRawContent(content: string): string[] {
   if (!content || !content.trim()) return [];
@@ -241,6 +176,10 @@ export default function App() {
 
   const [showSupabaseModal, setShowSupabaseModal] = useState(false);
   const [sqlCopySuccess, setSqlCopySuccess] = useState(false);
+  
+  // Custom Browser-Level Supabase states for direct saving from Vercel static environments
+  const [supabaseUrlInput, setSupabaseUrlInput] = useState(() => localStorage.getItem("local_supabase_url") || "");
+  const [supabaseAnonKeyInput, setSupabaseAnonKeyInput] = useState(() => localStorage.getItem("local_supabase_anon_key") || "");
 
   // User credentials
   const financeUser = "yadagiri.fde9@gmail.com";
@@ -264,6 +203,27 @@ export default function App() {
     }
   ];
 
+  // Helper to get client-side Supabase client directly in the browser
+  const getClientSupabase = () => {
+    let url = localStorage.getItem("local_supabase_url") || "";
+    let anonKey = localStorage.getItem("local_supabase_anon_key") || "";
+
+    if (!url || !anonKey) {
+      // Use standard Vite environment variables if available
+      url = ((import.meta as any).env.VITE_SUPABASE_URL as string) || "";
+      anonKey = ((import.meta as any).env.VITE_SUPABASE_ANON_KEY as string) || "";
+    }
+
+    if (url && anonKey) {
+      try {
+        return createClient(url, anonKey);
+      } catch (err) {
+        console.error("Browser-direct Supabase initialization failed:", err);
+      }
+    }
+    return null;
+  };
+
   // Fetch initial data
   const fetchData = async () => {
     setLoadingInvoices(true);
@@ -284,10 +244,37 @@ export default function App() {
       }
       
       if (usingLocalOnly) {
-        setConfigStatus({
-          configured: false,
-          usingFallback: true
-        });
+        const clientSB = getClientSupabase();
+        if (clientSB) {
+          let schemaErrorInvoices = null;
+          let schemaErrorAuditLogs = null;
+          try {
+            const { error } = await clientSB.from("invoices").select("id").limit(1);
+            if (error) schemaErrorInvoices = error.message;
+          } catch (e: any) {
+            schemaErrorInvoices = e.message || String(e);
+          }
+
+          try {
+            const { error } = await clientSB.from("audit_logs").select("id").limit(1);
+            if (error) schemaErrorAuditLogs = error.message;
+          } catch (e: any) {
+            schemaErrorAuditLogs = e.message || String(e);
+          }
+
+          setConfigStatus({
+            configured: true,
+            supabaseUrl: localStorage.getItem("local_supabase_url") || ((import.meta as any).env.VITE_SUPABASE_URL as string) || "Client Direct",
+            usingFallback: !!(schemaErrorInvoices || schemaErrorAuditLogs),
+            schemaErrorInvoices,
+            schemaErrorAuditLogs
+          });
+        } else {
+          setConfigStatus({
+            configured: false,
+            usingFallback: true
+          });
+        }
       }
       
       // Invoices
@@ -305,17 +292,49 @@ export default function App() {
       }
 
       if (!gotInvoices) {
+        const clientSB = getClientSupabase();
+        if (clientSB) {
+          try {
+            const { data, error } = await clientSB.from("invoices").select("*").order("date", { ascending: false });
+            if (error) throw error;
+            if (data) {
+              setInvoices(data);
+              localStorage.setItem("fde_finance_invoices", JSON.stringify(data));
+              gotInvoices = true;
+            }
+          } catch (sbErr) {
+            console.warn("Direct-client Supabase invoices load warning:", sbErr);
+          }
+        }
+      }
+
+      if (!gotInvoices) {
         const cached = localStorage.getItem("fde_finance_invoices");
         if (cached) {
           try {
-            setInvoices(JSON.parse(cached));
+            const parsed = JSON.parse(cached);
+            if (Array.isArray(parsed)) {
+              const filtered = parsed.filter((inv: any) => 
+                inv && 
+                !inv.id.startsWith("rec_seeded_") && 
+                !inv.id.startsWith("rec_aws_") && 
+                !inv.id.startsWith("rec_slack_") && 
+                !inv.id.startsWith("rec_uber_") && 
+                !inv.id.startsWith("rec_staples_")
+              );
+              setInvoices(filtered);
+              localStorage.setItem("fde_finance_invoices", JSON.stringify(filtered));
+            } else {
+              setInvoices([]);
+              localStorage.setItem("fde_finance_invoices", JSON.stringify([]));
+            }
           } catch (e) {
-            setInvoices(SEEDED_INVOICES);
-            localStorage.setItem("fde_finance_invoices", JSON.stringify(SEEDED_INVOICES));
+            setInvoices([]);
+            localStorage.setItem("fde_finance_invoices", JSON.stringify([]));
           }
         } else {
-          setInvoices(SEEDED_INVOICES);
-          localStorage.setItem("fde_finance_invoices", JSON.stringify(SEEDED_INVOICES));
+          setInvoices([]);
+          localStorage.setItem("fde_finance_invoices", JSON.stringify([]));
         }
       }
 
@@ -334,10 +353,38 @@ export default function App() {
       }
 
       if (!gotAudits) {
+        const clientSB = getClientSupabase();
+        if (clientSB) {
+          try {
+            const { data, error } = await clientSB.from("audit_logs").select("*").order("timestamp", { ascending: false });
+            if (error) throw error;
+            if (data) {
+              setAuditLogs(data);
+              localStorage.setItem("fde_finance_audit_logs", JSON.stringify(data));
+              gotAudits = true;
+            }
+          } catch (sbErr) {
+            console.warn("Direct-client Supabase audit-logs load warning:", sbErr);
+          }
+        }
+      }
+
+      if (!gotAudits) {
         const cachedAudits = localStorage.getItem("fde_finance_audit_logs");
         if (cachedAudits) {
           try {
-            setAuditLogs(JSON.parse(cachedAudits));
+            const parsed = JSON.parse(cachedAudits);
+            if (Array.isArray(parsed)) {
+              const filtered = parsed.filter((aud: any) => 
+                aud && 
+                !aud.id.startsWith("audit_")
+              );
+              setAuditLogs(filtered);
+              localStorage.setItem("fde_finance_audit_logs", JSON.stringify(filtered));
+            } else {
+              setAuditLogs([]);
+              localStorage.setItem("fde_finance_audit_logs", JSON.stringify([]));
+            }
           } catch (e) {
             setAuditLogs([]);
           }
@@ -441,10 +488,29 @@ export default function App() {
             saved = true;
           }
         } catch (e) {
-          console.warn("Failed to write to API, using client-side store fallback:", e);
+          console.warn("Failed to write to API, trying direct browser Supabase fallback:", e);
         }
 
         if (!saved) {
+          const clientSB = getClientSupabase();
+          if (clientSB) {
+            try {
+              const { error } = await clientSB.from("invoices").insert([newInvoice]);
+              if (error) {
+                console.error("Direct browser Supabase insert failed:", error.message);
+              } else {
+                console.log("Direct browser Supabase insert successful!");
+                saved = true;
+              }
+            } catch (sbErr) {
+              console.error("Direct browser Supabase insert exception:", sbErr);
+            }
+          }
+        }
+
+        if (!saved) {
+          newlySavedRecords.push(newInvoice);
+        } else if (saved && !newlySavedRecords.some(r => r.id === newInvoice.id)) {
           newlySavedRecords.push(newInvoice);
         }
       }
@@ -474,7 +540,7 @@ export default function App() {
           gotAudits = true;
         }
       } catch (e) {
-        console.warn("Failed to sync audit logs, inserting local audit logs...");
+        console.warn("Failed to sync audit logs, trying direct client-side fallback...");
       }
 
       if (!gotAudits) {
@@ -484,6 +550,8 @@ export default function App() {
           try { localAudits = JSON.parse(cachedAudits); } catch (e) {}
         }
 
+        const clientSB = getClientSupabase();
+
         for (const record of newlySavedRecords) {
           const newAudit: AuditLog = {
             id: "aud_" + Math.random().toString(36).substr(2, 9),
@@ -491,10 +559,27 @@ export default function App() {
             action: "Invoice Parsed",
             user: financeUser,
             recordId: record.id,
-            details: `Extracted & mapped ${record.vendor} invoice amount $${record.amount} via fallbacks (Vercel Client)`,
+            details: `Extracted & mapped ${record.vendor} invoice amount $${record.amount} via fallbacks (Vercel Client)` + (clientSB ? " (Synced with Supabase Cloud Core)" : ""),
             changes: []
           };
           localAudits.unshift(newAudit);
+
+          if (clientSB) {
+            try {
+              await clientSB.from("audit_logs").insert([{
+                id: newAudit.id,
+                timestamp: newAudit.timestamp,
+                action: newAudit.action,
+                user: newAudit.user,
+                recordId: newAudit.recordId,
+                recordid: newAudit.recordId,
+                details: newAudit.details,
+                changes: newAudit.changes
+              }]);
+            } catch (sbErr) {
+              console.error("Direct browser Supabase insert audit failed:", sbErr);
+            }
+          }
         }
         setAuditLogs(localAudits);
         localStorage.setItem("fde_finance_audit_logs", JSON.stringify(localAudits));
@@ -576,6 +661,28 @@ export default function App() {
       }
 
       if (!saveSuccess) {
+        const clientSB = getClientSupabase();
+        if (clientSB) {
+          try {
+            const { error } = await clientSB.from("invoices").update(updatedRecord).eq("id", recordId);
+            if (error) {
+              console.error("Direct browser Supabase update failed:", error.message);
+            } else {
+              console.log("Direct browser Supabase update successful!");
+              saveSuccess = true;
+              setInvoices(prev => {
+                const list = prev.map(inv => inv.id === recordId ? updatedRecord : inv);
+                localStorage.setItem("fde_finance_invoices", JSON.stringify(list));
+                return list;
+              });
+            }
+          } catch (sbErr) {
+            console.error("Direct browser Supabase update exception:", sbErr);
+          }
+        }
+      }
+
+      if (!saveSuccess) {
         setInvoices(prev => {
           const list = prev.map(inv => inv.id === recordId ? updatedRecord : inv);
           localStorage.setItem("fde_finance_invoices", JSON.stringify(list));
@@ -588,6 +695,7 @@ export default function App() {
         if (localAuditsCached) {
           try { localAudits = JSON.parse(localAuditsCached); } catch (e) {}
         }
+        const clientSB = getClientSupabase();
         const auditDesc = changesList.length > 0 
           ? `Modified fields on record ${recordId}: ${changesList.map(c => `${c.field} changed from '${c.oldValue}' to '${c.newValue}'`).join("; ")} (Local fallback)`
           : `Updated general metadata on invoice record ${recordId} (Local fallback)`;
@@ -598,12 +706,29 @@ export default function App() {
           action: changesList.some(c => c.field === "status") ? "Status Changed" : "Record Updated",
           user: financeUser,
           recordId: recordId,
-          details: auditDesc,
+          details: auditDesc + (clientSB ? " (Synced with Supabase Cloud Core)" : ""),
           changes: changesList
         };
         localAudits.unshift(newAudit);
         setAuditLogs(localAudits);
         localStorage.setItem("fde_finance_audit_logs", JSON.stringify(localAudits));
+
+        if (clientSB) {
+          try {
+            await clientSB.from("audit_logs").insert([{
+              id: newAudit.id,
+              timestamp: newAudit.timestamp,
+              action: newAudit.action,
+              user: newAudit.user,
+              recordId: newAudit.recordId,
+              recordid: newAudit.recordId,
+              details: newAudit.details,
+              changes: newAudit.changes
+            }]);
+          } catch (sbErr) {
+            console.error("Direct browser Supabase insert audit failed during edit:", sbErr);
+          }
+        }
       }
 
       setEditingInvoiceId(null);
@@ -667,6 +792,28 @@ export default function App() {
       }
 
       if (!saveSuccess) {
+        const clientSB = getClientSupabase();
+        if (clientSB) {
+          try {
+            const { error } = await clientSB.from("invoices").update(updatedRecord).eq("id", record.id);
+            if (error) {
+              console.error("Direct browser Supabase status toggle failed:", error.message);
+            } else {
+              console.log("Direct browser Supabase status toggle successful!");
+              saveSuccess = true;
+              setInvoices(prev => {
+                const list = prev.map(item => item.id === record.id ? updatedRecord : item);
+                localStorage.setItem("fde_finance_invoices", JSON.stringify(list));
+                return list;
+              });
+            }
+          } catch (sbErr) {
+            console.error("Direct browser Supabase status toggle exception:", sbErr);
+          }
+        }
+      }
+
+      if (!saveSuccess) {
         setInvoices(prev => {
           const list = prev.map(item => item.id === record.id ? updatedRecord : item);
           localStorage.setItem("fde_finance_invoices", JSON.stringify(list));
@@ -680,6 +827,7 @@ export default function App() {
           try { localAudits = JSON.parse(localAuditsCached); } catch (e) {}
         }
         
+        const clientSB = getClientSupabase();
         const changesList = [{ field: "status", oldValue: oldStatus, newValue: newStatus }];
 
         const newAudit: AuditLog = {
@@ -688,12 +836,29 @@ export default function App() {
           action: "Status Changed",
           user: financeUser,
           recordId: record.id,
-          details: `Quick status updated from '${oldStatus}' to '${newStatus}' (Local fallback)`,
+          details: `Quick status updated from '${oldStatus}' to '${newStatus}'` + (clientSB ? " (Synced with Supabase Cloud Core)" : " (Local fallback)"),
           changes: changesList
         };
         localAudits.unshift(newAudit);
         setAuditLogs(localAudits);
         localStorage.setItem("fde_finance_audit_logs", JSON.stringify(localAudits));
+
+        if (clientSB) {
+          try {
+            await clientSB.from("audit_logs").insert([{
+              id: newAudit.id,
+              timestamp: newAudit.timestamp,
+              action: newAudit.action,
+              user: newAudit.user,
+              recordId: newAudit.recordId,
+              recordid: newAudit.recordId,
+              details: newAudit.details,
+              changes: newAudit.changes
+            }]);
+          } catch (sbErr) {
+            console.error("Direct browser Supabase insert audit failed during status check:", sbErr);
+          }
+        }
       }
 
       // Refresh audits
@@ -2038,6 +2203,68 @@ export default function App() {
                     <p className="text-slate-400 text-[11px] leading-relaxed">
                       Copy the SQL script below, paste it into the editor workspace, and press the **Run** button to generate correct table structures.
                     </p>
+                  </div>
+                </div>
+
+                {/* Direct link credentials */}
+                <div className="bg-slate-950 border border-slate-850 p-4 rounded-lg space-y-4">
+                  <div>
+                    <h4 className="text-slate-100 font-bold mb-1 font-mono text-[11px] uppercase tracking-wider text-emerald-400">Vercel & Browser-Direct Supabase Credential Link</h4>
+                    <p className="text-slate-400 text-[11px] leading-relaxed">
+                      Are you accessing the application from Vercel? Since static hosting has no backend database proxy running, provide your credentials below to establish a direct secure secure connection from your web browser to Supabase.
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <label className="text-[10px] text-slate-400 font-mono block">Supabase Project URL</label>
+                      <input
+                        type="text"
+                        placeholder="https://your-project.supabase.co"
+                        value={supabaseUrlInput}
+                        onChange={(e) => setSupabaseUrlInput(e.target.value)}
+                        className="w-full bg-slate-900 border border-slate-800 text-xs text-white p-2 rounded focus:outline-none focus:border-emerald-500"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[10px] text-slate-400 font-mono block">Supabase Anon Key</label>
+                      <input
+                        type="password"
+                        placeholder="your-anon-public-api-key"
+                        value={supabaseAnonKeyInput}
+                        onChange={(e) => setSupabaseAnonKeyInput(e.target.value)}
+                        className="w-full bg-slate-900 border border-slate-800 text-xs text-white p-2 rounded focus:outline-none focus:border-emerald-500"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex justify-end gap-2">
+                    <button
+                      onClick={() => {
+                        localStorage.removeItem("local_supabase_url");
+                        localStorage.removeItem("local_supabase_anon_key");
+                        setSupabaseUrlInput("");
+                        setSupabaseAnonKeyInput("");
+                        fetchData();
+                        alert("Cleared browser-direct credentials fallback. Defaulting to local sandbox cache.");
+                      }}
+                      className="px-3 py-1 bg-slate-900 hover:bg-slate-850 text-slate-300 border border-slate-800 text-[10px] rounded font-mono cursor-pointer"
+                    >
+                      Clear Linked Keys
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (!supabaseUrlInput.trim() || !supabaseAnonKeyInput.trim()) {
+                          alert("Please fill in both Supabase URL and Anon Key to activate active direct browser storage.");
+                          return;
+                        }
+                        localStorage.setItem("local_supabase_url", supabaseUrlInput.trim());
+                        localStorage.setItem("local_supabase_anon_key", supabaseAnonKeyInput.trim());
+                        fetchData();
+                        alert("Linked and configured browser-direct Supabase connection successfully!");
+                      }}
+                      className="px-4 py-1 bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-sans font-bold text-[10px] rounded cursor-pointer"
+                    >
+                      Save & Link Database
+                    </button>
                   </div>
                 </div>
 
