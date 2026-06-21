@@ -366,10 +366,27 @@ function splitRawContent(content: string): string[] {
     return doubleNewlineSplit.map(s => s.trim()).filter(Boolean);
   }
 
-  // 5. If it is a line-delimited list where lines contain details
+  // 5. Resilient line-delimited split:
+  // If we have multiple lines, and at least 60% of those non-empty lines represent a billing indicator
   const lines = content.split("\n").map(s => s.trim()).filter(Boolean);
-  if (lines.length > 1 && lines.every(l => l.includes(":") || l.toLowerCase().includes("invoice") || l.toLowerCase().includes("receipt"))) {
-    return lines;
+  if (lines.length > 1) {
+    const matchingLinesCount = lines.filter(l => {
+      const lower = l.toLowerCase();
+      return l.includes(":") || 
+             l.includes("$") || 
+             l.includes("€") || 
+             l.includes("£") || 
+             lower.includes("invoice") || 
+             lower.includes("receipt") || 
+             lower.includes("billed") || 
+             lower.includes("charge") || 
+             lower.includes("fee") || 
+             lower.includes("payment");
+    }).length;
+
+    if (matchingLinesCount / lines.length >= 0.6) {
+      return lines;
+    }
   }
 
   return [content.trim()];

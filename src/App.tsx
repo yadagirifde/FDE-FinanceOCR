@@ -55,10 +55,27 @@ function splitRawContent(content: string): string[] {
     return doubleNewlineSplit.map(s => s.trim()).filter(Boolean);
   }
 
-  // 5. If it is a line-delimited list where lines contain details
+  // 5. Resilient line-delimited split:
+  // If we have multiple lines, and at least 60% of those non-empty lines represent a billing indicator
   const lines = content.split("\n").map(s => s.trim()).filter(Boolean);
-  if (lines.length > 1 && lines.every(l => l.includes(":") || l.toLowerCase().includes("invoice") || l.toLowerCase().includes("receipt"))) {
-    return lines;
+  if (lines.length > 1) {
+    const matchingLinesCount = lines.filter(l => {
+      const lower = l.toLowerCase();
+      return l.includes(":") || 
+             l.includes("$") || 
+             l.includes("€") || 
+             l.includes("£") || 
+             lower.includes("invoice") || 
+             lower.includes("receipt") || 
+             lower.includes("billed") || 
+             lower.includes("charge") || 
+             lower.includes("fee") || 
+             lower.includes("payment");
+    }).length;
+
+    if (matchingLinesCount / lines.length >= 0.6) {
+      return lines;
+    }
   }
 
   return [content.trim()];
@@ -70,59 +87,206 @@ function runClientSideHeuristics(content: string, source: string) {
 
   for (const chunk of chunks) {
     if (!chunk || !chunk.trim()) continue;
-    const lines = chunk.split("\n");
+    const lines = chunk.split("\n").map(l => l.trim()).filter(Boolean);
+    
     let vendor = "Unknown Vendor";
     let amount = 0.0;
     let category = "Other";
     let invoice_number = "N/A";
+    let extractedDate = "";
 
+    // 1. EXTRACT VENDOR
+    // Check line by line for explicit labels: "vendor:", "merchant:", "company:", "from:", "billed by:"
     for (const l of lines) {
-      if (!l) continue;
-      const lowerLine = l.toLowerCase();
-      if (lowerLine.includes("aws") || lowerLine.includes("amazon")) {
-        vendor = "Amazon Web Services";
-        category = "Hosting";
-      } else if (lowerLine.includes("slack")) {
-        vendor = "Slack Technologies";
-        category = "Software";
-      } else if (lowerLine.includes("uber")) {
-        vendor = "Uber Logistics";
-        category = "Travel/Logistics";
-      } else if (lowerLine.includes("zoom")) {
-        vendor = "Zoom Video Communications";
-        category = "Software";
-      } else if (lowerLine.includes("supabase")) {
-        vendor = "Supabase Database";
-        category = "Hosting";
-      } else if (lowerLine.includes("fedex")) {
-        vendor = "FedEx Express Office";
-        category = "Travel/Logistics";
-      } else if (lowerLine.includes("invoice")) {
-        const matches = l.match(/invoice\s*#?\s*([A-Za-z0-9-]+)/i);
-        if (matches) invoice_number = matches[1];
-      }
-
-      const moneyMatch = l.match(/\$?\s*([0-9,]+\.[0-9]{2})/);
-      if (moneyMatch && amount === 0.0) {
-        amount = parseFloat(moneyMatch[1].replace(/,/g, ""));
+      const labelMatch = l.match(/^(?:vendor|merchant|company|billed\s+by|from|issuer|supplier)\s*:\s*(.+)$/i);
+      if (labelMatch && labelMatch[1]) {
+        vendor = labelMatch[1].trim();
+        break;
       }
     }
 
-    if (vendor === "Unknown Vendor" && chunk.includes(":")) {
-      const colonSplit = chunk.split(":");
-      if (colonSplit && colonSplit.length >= 2 && colonSplit[1]) {
-        vendor = colonSplit[0].trim();
-        const potentialAmount = parseFloat(colonSplit[1].replace(/[^0-9.]/g, ""));
-        if (!isNaN(potentialAmount)) {
-          amount = potentialAmount;
+    // If still unknown, scan for common vendor keywords anywhere in the chunk text
+    if (vendor === "Unknown Vendor") {
+      const lowerChunk = chunk.toLowerCase();
+      if (lowerChunk.includes("aws") || lowerChunk.includes("amazon")) {
+        vendor = "Amazon Web Services";
+        category = "Hosting";
+      } else if (lowerChunk.includes("slack")) {
+        vendor = "Slack Technologies";
+        category = "Software";
+      } else if (lowerChunk.includes("uber")) {
+        vendor = "Uber Logistics";
+        category = "Travel/Logistics";
+      } else if (lowerChunk.includes("zoom")) {
+        vendor = "Zoom Video Communications";
+        category = "Software";
+      } else if (lowerChunk.includes("supabase")) {
+        vendor = "Supabase Database";
+        category = "Hosting";
+      } else if (lowerChunk.includes("fedex")) {
+        vendor = "FedEx Express Office";
+        category = "Travel/Logistics";
+      } else if (lowerChunk.includes("stripe")) {
+        vendor = "Stripe Payments";
+        category = "Payment Processing";
+      } else if (lowerChunk.includes("postmark")) {
+        vendor = "Postmark Email";
+        category = "Software";
+      } else if (lowerChunk.includes("google") || lowerChunk.includes("gcp") || lowerChunk.includes("workspace")) {
+        vendor = "Google Cloud Platform";
+        category = "Hosting";
+      } else if (lowerChunk.includes("github")) {
+        vendor = "GitHub Inc.";
+        category = "Software";
+      } else if (lowerChunk.includes("vercel")) {
+        vendor = "Vercel Inc.";
+        category = "Hosting";
+      } else if (lowerChunk.includes("openai") || lowerChunk.includes("chatgpt")) {
+        vendor = "OpenAI";
+        category = "Software";
+      }
+    }
+
+    // If still unknown, fallback to using the first non-empty line of the chunk (if short and doesn't look like an action list)
+    if (vendor === "Unknown Vendor" && lines.length > 0) {
+      const firstLine = lines[0];
+      const hasNumbers = /\d/.test(firstLine);
+      const isShort = firstLine.length < 50;
+      const lowerFirst = firstLine.toLowerCase();
+      const isGeneric = lowerFirst.includes("invoice") || lowerFirst.includes("receipt") || lowerFirst.includes("billing") || lowerFirst.includes("statement");
+      
+      if (isShort && !isGeneric && !hasNumbers) {
+        vendor = firstLine.replace(/^[\s\-_:=#*]+|[\s\-_:=#*]+$/g, "").trim();
+      } else if (chunk.includes(":")) {
+        // If it features a colon partition (e.g. "Slack: $49")
+        const colonSplit = chunk.split(":");
+        if (colonSplit && colonSplit[0] && colonSplit[0].trim().length < 40) {
+          vendor = colonSplit[0].trim();
         }
+      }
+    }
+
+    // 2. EXTRACT AMOUNT
+    // Scan for high-confidence labelled amounts first ("amount: 49", "total: $250.00")
+    for (const l of lines) {
+      const amountLabelMatch = l.match(/^(?:amount|total|charge|due|cost|price|fee|grand\s+total|subtotal)\s*:\s*[^0-9-]*(-?[0-9,]+\.[0-9]{2})/i) ||
+                               l.match(/^(?:amount|total|charge|due|cost|price|fee|grand\s+total|subtotal)\s*:\s*[^0-9-]*(-?[0-9,]+)/i);
+      if (amountLabelMatch && amountLabelMatch[1]) {
+        amount = parseFloat(amountLabelMatch[1].replace(/,/g, ""));
+        break;
+      }
+    }
+
+    // If still 0.0, scan modern currency values like "$149.90", "€15", "£24.99", or bare decimals
+    if (amount === 0.0) {
+      for (const l of lines) {
+        // Ignore lines that look like dates to prevent year collisions of 2026/2025/2024
+        if (/\d{4}-\d{2}-\d{2}/.test(l) || /\d{1,2}\/\d{1,2}\/\d{2,4}/.test(l)) {
+          continue;
+        }
+        
+        // Match numbers preceded by standard currency signs
+        const moneySymbolMatch = l.match(/[\$€£]\s*(-?[0-9,]+\.[0-9]{2})/i) || l.match(/[\$€£]\s*(-?[0-9,]+)/i);
+        if (moneySymbolMatch && moneySymbolMatch[1]) {
+          amount = parseFloat(moneySymbolMatch[1].replace(/,/g, ""));
+          break;
+        }
+
+        // Match standalone decimals (e.g. "124.50")
+        const moneyDecimalMatch = l.match(/\b(-?[0-9,]+\.[0-9]{2})\b/);
+        if (moneyDecimalMatch && moneyDecimalMatch[1]) {
+          const val = parseFloat(moneyDecimalMatch[1].replace(/,/g, ""));
+          // Eliminate common year-decimals or order number lookalikes (usually we want non-zero, small amounts)
+          if (val > 0.01 && val < 500000) {
+            amount = val;
+            break;
+          }
+        }
+        
+        // Match standard standalone integers
+        const intMatch = l.match(/\b(-?[0-9]+)\b/);
+        if (intMatch && intMatch[1]) {
+          const val = parseInt(intMatch[1].replace(/,/g, ""), 10);
+          if (val > 0 && val < 10000 && val !== 2024 && val !== 2025 && val !== 2026 && val !== 2027) {
+            amount = val;
+          }
+        }
+      }
+    }
+
+    // 3. EXTRACT CATEGORY (based on vendor)
+    const lowerVendor = vendor.toLowerCase();
+    if (lowerVendor.includes("aws") || lowerVendor.includes("amazon") || lowerVendor.includes("hosting") || lowerVendor.includes("supabase") || lowerVendor.includes("cloud") || lowerVendor.includes("vercel") || lowerVendor.includes("digitalocean")) {
+      category = "Hosting";
+    } else if (lowerVendor.includes("slack") || lowerVendor.includes("zoom") || lowerVendor.includes("figma") || lowerVendor.includes("github") || lowerVendor.includes("openai") || lowerVendor.includes("atlassian") || lowerVendor.includes("microsoft") || lowerVendor.includes("software")) {
+      category = "Software";
+    } else if (lowerVendor.includes("uber") || lowerVendor.includes("fedex") || lowerVendor.includes("delivery") || lowerVendor.includes("shipping") || lowerVendor.includes("freight") || lowerVendor.includes("logistics")) {
+      category = "Travel/Logistics";
+    } else if (lowerVendor.includes("staples") || lowerVendor.includes("office") || lowerVendor.includes("supplies")) {
+      category = "Office Supplies";
+    } else if (lowerVendor.includes("stripe") || lowerVendor.includes("payment") || lowerVendor.includes("processing")) {
+      category = "Payment Processing";
+    }
+
+    // 4. EXTRACT DATE
+    // Explicit date labels
+    for (const l of lines) {
+      const dateLabelMatch = l.match(/^(?:date|billed\s+date|issued|issued\s+date|invoice\s+date)\s*:\s*(.+)$/i);
+      if (dateLabelMatch && dateLabelMatch[1]) {
+        extractedDate = dateLabelMatch[1].trim();
+        break;
+      }
+    }
+
+    // If still empty, scan for standard date patterns
+    if (!extractedDate) {
+      const isoMatch = chunk.match(/(\d{4}-\d{2}-\d{2})/);
+      if (isoMatch) {
+        extractedDate = isoMatch[1];
+      } else {
+        const usMatch = chunk.match(/(\d{1,2}\/\d{1,2}\/\d{2,4})/);
+        if (usMatch) {
+          extractedDate = usMatch[1];
+        } else {
+          // Check for natural month matches like Jun 15, June 19, etc.
+          const naturalMatch = chunk.match(/([A-Z][a-z]{2,8}\s+\d{1,2},?\s+\d{4})/) || chunk.match(/(\d{1,2}\s+[A-Z][a-z]{2,8}\s+\d{4})/);
+          if (naturalMatch) {
+            extractedDate = naturalMatch[1];
+          }
+        }
+      }
+    }
+
+    // Standardize Extracted Date
+    let finalDate = new Date().toISOString().substring(0, 10);
+    if (extractedDate) {
+      try {
+        const parsed = new Date(extractedDate);
+        if (!isNaN(parsed.getTime())) {
+          finalDate = parsed.toISOString().substring(0, 10);
+        }
+      } catch (e) {}
+    }
+
+    // 5. EXTRACT INVOICE NUMBER
+    for (const l of lines) {
+      const invMatch = l.match(/^(?:invoice\s*#|invoice\s*number|inv\s*#|invoice_number|inv_no|bill\s*#|po\s*#)\s*:\s*(.+)$/i);
+      if (invMatch && invMatch[1]) {
+        invoice_number = invMatch[1].trim();
+        break;
+      }
+    }
+    if (invoice_number === "N/A") {
+      const invPattern = chunk.match(/\b(INV-[A-Za-z0-9-]+)\b/i) || chunk.match(/\b(PO-[A-Za-z0-9-]+)\b/i);
+      if (invPattern) {
+        invoice_number = invPattern[1].toUpperCase();
       }
     }
 
     fallbackList.push({
       vendor,
       amount: amount || 45.00,
-      date: new Date().toISOString().substring(0, 10),
+      date: finalDate,
       category,
       invoice_number: invoice_number !== "N/A" ? invoice_number : "INV-" + Math.floor(Math.random() * 90000 + 10000),
       original_source: source || "Pasted Text",
@@ -202,6 +366,7 @@ export default function App() {
   // Custom Browser-Level Supabase states for direct saving from Vercel static environments
   const [supabaseUrlInput, setSupabaseUrlInput] = useState(() => localStorage.getItem("local_supabase_url") || "");
   const [supabaseAnonKeyInput, setSupabaseAnonKeyInput] = useState(() => localStorage.getItem("local_supabase_anon_key") || "");
+  const [supabaseWriteError, setSupabaseWriteError] = useState<string | null>(null);
 
   // User credentials
   const financeUser = "yadagiri.fde9@gmail.com";
@@ -484,18 +649,18 @@ export default function App() {
           category: item.category || "Other",
           raw_content: rawPastedText,
           original_source: originalSource,
-          invoice_number: item.invoice_number || undefined,
+          invoice_number: item.invoice_number || null,
           status: "Pending Approval",
           processed_at: new Date().toISOString(),
           extracted_metadata: {
             currency: item.extracted_metadata?.currency || "USD",
             taxAmount: Number(item.extracted_metadata?.taxAmount) || 0.0,
-            vendorAddress: item.extracted_metadata?.vendorAddress || undefined,
-            paymentTerms: item.extracted_metadata?.paymentTerms || undefined,
+            vendorAddress: item.extracted_metadata?.vendorAddress || null,
+            paymentTerms: item.extracted_metadata?.paymentTerms || null,
             confidenceScore: Number(item.extracted_metadata?.confidenceScore) || 85,
             lineItems: item.extracted_metadata?.lineItems || []
           }
-        };
+        } as any;
 
         const clientSB = getClientSupabase();
         let saved = false;
@@ -506,15 +671,18 @@ export default function App() {
             const { error } = await clientSB.from("invoices").insert([newInvoice]);
             if (error) {
               console.error("Direct browser Supabase insert failed:", error.message);
+              setSupabaseWriteError(`Supabase Insert Error: ${error.message} (Tried inserting to table 'invoices'). Verify that the table schema has been configured using the setup SQL script in our DB Settings modal.`);
             } else {
               console.log("Direct browser Supabase insert successful!");
+              setSupabaseWriteError(null);
               saved = true;
               if (!newlySavedRecords.some(r => r.id === newInvoice.id)) {
                 newlySavedRecords.push(newInvoice);
               }
             }
-          } catch (sbErr) {
+          } catch (sbErr: any) {
             console.error("Direct browser Supabase insert exception:", sbErr);
+            setSupabaseWriteError(`Supabase Insert Exception: ${sbErr.message || String(sbErr)}`);
           }
         }
 
@@ -680,8 +848,10 @@ export default function App() {
           const { error } = await clientSB.from("invoices").update(updatedRecord).eq("id", recordId);
           if (error) {
             console.error("Direct browser Supabase update failed:", error.message);
+            setSupabaseWriteError(`Supabase Update Error: ${error.message} (Tried updating row ID: ${recordId}). Verify table existence and RLS write permissions.`);
           } else {
             console.log("Direct browser Supabase update successful!");
+            setSupabaseWriteError(null);
             saveSuccess = true;
             setInvoices(prev => {
               const list = prev.map(inv => inv.id === recordId ? updatedRecord : inv);
@@ -689,8 +859,9 @@ export default function App() {
               return list;
             });
           }
-        } catch (sbErr) {
+        } catch (sbErr: any) {
           console.error("Direct browser Supabase update exception:", sbErr);
+          setSupabaseWriteError(`Supabase Update Exception: ${sbErr.message || String(sbErr)}`);
         }
       }
 
@@ -812,8 +983,10 @@ export default function App() {
           const { error } = await clientSB.from("invoices").update(updatedRecord).eq("id", record.id);
           if (error) {
             console.error("Direct browser Supabase status toggle failed:", error.message);
+            setSupabaseWriteError(`Supabase Status Change Error: ${error.message} (Tried updating status to '${newStatus}' for record ID: ${record.id}). Check if public write access policies are permitted.`);
           } else {
             console.log("Direct browser Supabase status toggle successful!");
+            setSupabaseWriteError(null);
             saveSuccess = true;
             setInvoices(prev => {
               const list = prev.map(item => item.id === record.id ? updatedRecord : item);
@@ -821,8 +994,9 @@ export default function App() {
               return list;
             });
           }
-        } catch (sbErr) {
+        } catch (sbErr: any) {
           console.error("Direct browser Supabase status toggle exception:", sbErr);
+          setSupabaseWriteError(`Supabase Status Change Exception: ${sbErr.message || String(sbErr)}`);
         }
       }
 
@@ -1203,7 +1377,30 @@ export default function App() {
           </div>
         )}
 
-        {/* SECTION 1: KEY PERFORMANCE METRICS (CFO GRID) */}
+        {supabaseWriteError && (
+          <div className="bg-rose-950/40 border border-rose-900/80 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <div className="p-2 bg-rose-950/80 rounded-lg text-rose-400 mt-0.5">
+                <AlertTriangle className="w-5 h-5 shrink-0" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="text-xs font-semibold font-mono text-rose-400 uppercase tracking-wider">Supabase Write Operation Rejected</h3>
+                <p className="text-xs text-slate-350 leading-relaxed">
+                  The row insertion, update, or quick transition was rejected by your database. This typically happens if the schema tables are missing, columns do not match, or Row-Level Security (RLS) is active but blocks writes.
+                </p>
+                <p className="text-[10px] text-rose-400/95 font-mono font-semibold bg-rose-950/60 p-2 rounded border border-rose-900/40 mt-1 max-w-2xl break-all">
+                  ERROR DETAIL: {supabaseWriteError}
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => setSupabaseWriteError(null)}
+              className="px-3 py-1 bg-rose-900/50 hover:bg-rose-950 text-rose-200 text-[10px] font-mono rounded cursor-pointer shrink-0 border border-rose-800"
+            >
+              Dismiss Notice
+            </button>
+          </div>
+        )}
         <section aria-label="Key Performance Indicators" className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
           
           <div className="bg-slate-950 border border-slate-850 p-4 rounded-xl relative overflow-hidden">
