@@ -341,24 +341,37 @@ app.post("/api/audit-logs", (req, res) => {
   return res.json({ success: true });
 });
 
-// Helper to split raw content if multiple invoices are present using // or :
+// Helper to split raw content if multiple invoices are present using custom delimiters, lines, or empty spaces
 function splitRawContent(content: string): string[] {
-  // If the content is empty or only whitespace, return empty
   if (!content || !content.trim()) return [];
 
-  // Check if double slashes '//' are used to separate multiple entries
+  // 1. If explicit modern boundaries like '//' are present
   if (content.includes("//")) {
     return content.split("//").map(s => s.trim()).filter(Boolean);
   }
 
-  // Check if ' : ' with spaces is used as a delimiter (often used to structure key-values or separate distinct lines/entries)
-  // We can also split by ' : ' to handle list form "AWS: 34.00 : Zoom: 14.00 : Slack: 25.00"
+  // 2. Check for ' : ' with spaces
   if (content.split(" : ").length > 1) {
     return content.split(" : ").map(s => s.trim()).filter(Boolean);
   }
 
-  // We could also split by line endings if each line has a colon, but let's be careful not to oversplit.
-  // Standard split logic can use ':' if there are multiple entries on the same line.
+  // 3. Check for markdown horizontal rules or page dividers like '---' or '==='
+  if (/^[-=]{3,}/m.test(content)) {
+    return content.split(/^[-=]{3,}/m).map(s => s.trim()).filter(Boolean);
+  }
+
+  // 4. Split by double-newlines to treat empty line separations as distinct invoices/records
+  const doubleNewlineSplit = content.split(/\n\s*\n+/);
+  if (doubleNewlineSplit.length > 1) {
+    return doubleNewlineSplit.map(s => s.trim()).filter(Boolean);
+  }
+
+  // 5. If it is a line-delimited list where lines contain details
+  const lines = content.split("\n").map(s => s.trim()).filter(Boolean);
+  if (lines.length > 1 && lines.every(l => l.includes(":") || l.toLowerCase().includes("invoice") || l.toLowerCase().includes("receipt"))) {
+    return lines;
+  }
+
   return [content.trim()];
 }
 
@@ -381,11 +394,12 @@ app.post("/api/parse-raw", async (req, res) => {
           text: `You are an expert AI financial systems parser and receipts OCR analyzer. 
 Analyze the raw text block pasted below, which may contain one or multiple separate invoices, vendor emails, receipts, or Slack notifications.
 
-IMPORTANT BOUNDARY/DELIMITER RULE: 
-- If there is more than one separate invoice in the pasted data, use '//' or ':' as the boundary/delimiter to locate and separate each invoice (e.g. they might be written as "AWS: $40 // Zoom: $12" or "AWS: $40 : Zoom: $12").
-- Perform automatic transcription and extract standard corporate finance indicators for EACH identified invoice.
-
-If some fields are missing (like paymentTerms or tax), infer logically or leave them empty. Always calculate a confidence score between 0 and 100 representing how complete the extraction is.
+INSTRUCTIONS:
+1. Scan the entire pasted text and identify EVERY SINGLE separate invoice, transaction receipt, bill, or fee reference mentioned.
+2. Even if they are grouped together, listed sequentially, separated by empty lines, or written as line items, extract each of them as a separate invoice object in the returned array.
+3. There are NO limits to how many invoices you can extract. Extract all of them.
+4. For each identified invoice, perform automatic transcription and extract standard corporate finance indicators (vendor, amount, date, category, invoice_number, etc.).
+5. If some fields are missing, infer them logically or leave them empty, and always calculate a confidence score between 0 and 100 representing how complete the extraction is.
 
 Raw pasted transaction details:
 """

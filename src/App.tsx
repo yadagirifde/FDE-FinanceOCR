@@ -33,12 +33,34 @@ const SEEDED_INVOICES: InvoiceRecord[] = [];
 
 function splitRawContent(content: string): string[] {
   if (!content || !content.trim()) return [];
+
+  // 1. If explicit modern boundaries like '//' are present
   if (content.includes("//")) {
     return content.split("//").map(s => s.trim()).filter(Boolean);
   }
+
+  // 2. Check for ' : ' with spaces
   if (content.split(" : ").length > 1) {
     return content.split(" : ").map(s => s.trim()).filter(Boolean);
   }
+
+  // 3. Check for markdown horizontal rules or page dividers like '---' or '==='
+  if (/^[-=]{3,}/m.test(content)) {
+    return content.split(/^[-=]{3,}/m).map(s => s.trim()).filter(Boolean);
+  }
+
+  // 4. Split by double-newlines to treat empty line separations as distinct invoices/records
+  const doubleNewlineSplit = content.split(/\n\s*\n+/);
+  if (doubleNewlineSplit.length > 1) {
+    return doubleNewlineSplit.map(s => s.trim()).filter(Boolean);
+  }
+
+  // 5. If it is a line-delimited list where lines contain details
+  const lines = content.split("\n").map(s => s.trim()).filter(Boolean);
+  if (lines.length > 1 && lines.every(l => l.includes(":") || l.toLowerCase().includes("invoice") || l.toLowerCase().includes("receipt"))) {
+    return lines;
+  }
+
   return [content.trim()];
 }
 
@@ -279,32 +301,35 @@ export default function App() {
       
       // Invoices
       let gotInvoices = false;
-      try {
-        const invoicesRes = await fetch("/api/invoices");
-        if (invoicesRes.ok) {
-          const invoicesData = await invoicesRes.json();
-          setInvoices(invoicesData);
-          localStorage.setItem("fde_finance_invoices", JSON.stringify(invoicesData));
-          gotInvoices = true;
+      const clientSB = getClientSupabase();
+
+      // If we have direct client-side Supabase credentials in the browser, prioritize loading from there FIRST to show users their real Supabase data!
+      if (clientSB) {
+        try {
+          const { data, error } = await clientSB.from("invoices").select("*").order("date", { ascending: false });
+          if (error) throw error;
+          if (data) {
+            setInvoices(data);
+            localStorage.setItem("fde_finance_invoices", JSON.stringify(data));
+            gotInvoices = true;
+          }
+        } catch (sbErr) {
+          console.warn("Direct-client Supabase invoices load warning:", sbErr);
         }
-      } catch (e) {
-        console.warn("Failed fetching server invoices, reading local cache:", e);
       }
 
+      // If direct Supabase is not configured or failed, query backend proxy
       if (!gotInvoices) {
-        const clientSB = getClientSupabase();
-        if (clientSB) {
-          try {
-            const { data, error } = await clientSB.from("invoices").select("*").order("date", { ascending: false });
-            if (error) throw error;
-            if (data) {
-              setInvoices(data);
-              localStorage.setItem("fde_finance_invoices", JSON.stringify(data));
-              gotInvoices = true;
-            }
-          } catch (sbErr) {
-            console.warn("Direct-client Supabase invoices load warning:", sbErr);
+        try {
+          const invoicesRes = await fetch("/api/invoices");
+          if (invoicesRes.ok) {
+            const invoicesData = await invoicesRes.json();
+            setInvoices(invoicesData);
+            localStorage.setItem("fde_finance_invoices", JSON.stringify(invoicesData));
+            gotInvoices = true;
           }
+        } catch (e) {
+          console.warn("Failed fetching server invoices, reading local cache:", e);
         }
       }
 
@@ -340,32 +365,33 @@ export default function App() {
 
       // Audit logs
       let gotAudits = false;
-      try {
-        const auditsRes = await fetch("/api/audit-logs");
-        if (auditsRes.ok) {
-          const auditsData = await auditsRes.json();
-          setAuditLogs(auditsData);
-          localStorage.setItem("fde_finance_audit_logs", JSON.stringify(auditsData));
-          gotAudits = true;
+
+      // Prioritize client-direct Supabase connection for Audit Logs
+      if (clientSB) {
+        try {
+          const { data, error } = await clientSB.from("audit_logs").select("*").order("timestamp", { ascending: false });
+          if (error) throw error;
+          if (data) {
+            setAuditLogs(data);
+            localStorage.setItem("fde_finance_audit_logs", JSON.stringify(data));
+            gotAudits = true;
+          }
+        } catch (sbErr) {
+          console.warn("Direct-client Supabase audit-logs load warning:", sbErr);
         }
-      } catch (e) {
-        console.warn("Failed fetching server audits, reading local cache:", e);
       }
 
       if (!gotAudits) {
-        const clientSB = getClientSupabase();
-        if (clientSB) {
-          try {
-            const { data, error } = await clientSB.from("audit_logs").select("*").order("timestamp", { ascending: false });
-            if (error) throw error;
-            if (data) {
-              setAuditLogs(data);
-              localStorage.setItem("fde_finance_audit_logs", JSON.stringify(data));
-              gotAudits = true;
-            }
-          } catch (sbErr) {
-            console.warn("Direct-client Supabase audit-logs load warning:", sbErr);
+        try {
+          const auditsRes = await fetch("/api/audit-logs");
+          if (auditsRes.ok) {
+            const auditsData = await auditsRes.json();
+            setAuditLogs(auditsData);
+            localStorage.setItem("fde_finance_audit_logs", JSON.stringify(auditsData));
+            gotAudits = true;
           }
+        } catch (e) {
+          console.warn("Failed fetching server audits, reading local cache:", e);
         }
       }
 
@@ -471,7 +497,28 @@ export default function App() {
           }
         };
 
+        const clientSB = getClientSupabase();
         let saved = false;
+
+        // Try direct browser Supabase first if available to guarantee save on user's schema
+        if (clientSB) {
+          try {
+            const { error } = await clientSB.from("invoices").insert([newInvoice]);
+            if (error) {
+              console.error("Direct browser Supabase insert failed:", error.message);
+            } else {
+              console.log("Direct browser Supabase insert successful!");
+              saved = true;
+              if (!newlySavedRecords.some(r => r.id === newInvoice.id)) {
+                newlySavedRecords.push(newInvoice);
+              }
+            }
+          } catch (sbErr) {
+            console.error("Direct browser Supabase insert exception:", sbErr);
+          }
+        }
+
+        // Always also notify/persist to backend proxy for local files synchronization
         try {
           const saveResponse = await fetch("/api/invoices", {
             method: "POST",
@@ -484,32 +531,20 @@ export default function App() {
 
           if (saveResponse.ok) {
             const savedRecord = await saveResponse.json();
-            newlySavedRecords.push(savedRecord);
             saved = true;
-          }
-        } catch (e) {
-          console.warn("Failed to write to API, trying direct browser Supabase fallback:", e);
-        }
-
-        if (!saved) {
-          const clientSB = getClientSupabase();
-          if (clientSB) {
-            try {
-              const { error } = await clientSB.from("invoices").insert([newInvoice]);
-              if (error) {
-                console.error("Direct browser Supabase insert failed:", error.message);
-              } else {
-                console.log("Direct browser Supabase insert successful!");
-                saved = true;
-              }
-            } catch (sbErr) {
-              console.error("Direct browser Supabase insert exception:", sbErr);
+            if (!newlySavedRecords.some(r => r.id === savedRecord.id)) {
+              newlySavedRecords.push(savedRecord);
             }
           }
+        } catch (e) {
+          console.warn("Failed to write to API proxy:", e);
         }
 
+        // If not saved on both, push locally to guarantee fallback UX
         if (!saved) {
-          newlySavedRecords.push(newInvoice);
+          if (!newlySavedRecords.some(r => r.id === newInvoice.id)) {
+            newlySavedRecords.push(newInvoice);
+          }
         } else if (saved && !newlySavedRecords.some(r => r.id === newInvoice.id)) {
           newlySavedRecords.push(newInvoice);
         }
@@ -636,7 +671,30 @@ export default function App() {
         }
       };
 
+      const clientSB = getClientSupabase();
       let saveSuccess = false;
+
+      // Try direct browser Supabase update first if available
+      if (clientSB) {
+        try {
+          const { error } = await clientSB.from("invoices").update(updatedRecord).eq("id", recordId);
+          if (error) {
+            console.error("Direct browser Supabase update failed:", error.message);
+          } else {
+            console.log("Direct browser Supabase update successful!");
+            saveSuccess = true;
+            setInvoices(prev => {
+              const list = prev.map(inv => inv.id === recordId ? updatedRecord : inv);
+              localStorage.setItem("fde_finance_invoices", JSON.stringify(list));
+              return list;
+            });
+          }
+        } catch (sbErr) {
+          console.error("Direct browser Supabase update exception:", sbErr);
+        }
+      }
+
+      // Always synchronize with the backend proxy
       try {
         const response = await fetch(`/api/invoices/${recordId}`, {
           method: "PUT",
@@ -648,8 +706,8 @@ export default function App() {
         });
 
         if (response.ok) {
-          saveSuccess = true;
           const updated = await response.json();
+          saveSuccess = true;
           setInvoices(prev => {
             const list = prev.map(inv => inv.id === recordId ? updated : inv);
             localStorage.setItem("fde_finance_invoices", JSON.stringify(list));
@@ -657,29 +715,7 @@ export default function App() {
           });
         }
       } catch (err) {
-        console.warn("Failed to put on server, falling back to local edit:", err);
-      }
-
-      if (!saveSuccess) {
-        const clientSB = getClientSupabase();
-        if (clientSB) {
-          try {
-            const { error } = await clientSB.from("invoices").update(updatedRecord).eq("id", recordId);
-            if (error) {
-              console.error("Direct browser Supabase update failed:", error.message);
-            } else {
-              console.log("Direct browser Supabase update successful!");
-              saveSuccess = true;
-              setInvoices(prev => {
-                const list = prev.map(inv => inv.id === recordId ? updatedRecord : inv);
-                localStorage.setItem("fde_finance_invoices", JSON.stringify(list));
-                return list;
-              });
-            }
-          } catch (sbErr) {
-            console.error("Direct browser Supabase update exception:", sbErr);
-          }
-        }
+        console.warn("Failed to put on server proxy:", err);
       }
 
       if (!saveSuccess) {
@@ -767,7 +803,30 @@ export default function App() {
         status: newStatus
       };
 
+      const clientSB = getClientSupabase();
       let saveSuccess = false;
+
+      // Try direct browser Supabase quick status toggle first if available
+      if (clientSB) {
+        try {
+          const { error } = await clientSB.from("invoices").update(updatedRecord).eq("id", record.id);
+          if (error) {
+            console.error("Direct browser Supabase status toggle failed:", error.message);
+          } else {
+            console.log("Direct browser Supabase status toggle successful!");
+            saveSuccess = true;
+            setInvoices(prev => {
+              const list = prev.map(item => item.id === record.id ? updatedRecord : item);
+              localStorage.setItem("fde_finance_invoices", JSON.stringify(list));
+              return list;
+            });
+          }
+        } catch (sbErr) {
+          console.error("Direct browser Supabase status toggle exception:", sbErr);
+        }
+      }
+
+      // Always synchronize status toggles with backend proxy
       try {
         const response = await fetch(`/api/invoices/${record.id}`, {
           method: "PUT",
@@ -779,8 +838,8 @@ export default function App() {
         });
 
         if (response.ok) {
-          saveSuccess = true;
           const updated: InvoiceRecord = await response.json();
+          saveSuccess = true;
           setInvoices(prev => {
             const list = prev.map(item => item.id === record.id ? updated : item);
             localStorage.setItem("fde_finance_invoices", JSON.stringify(list));
@@ -788,29 +847,7 @@ export default function App() {
           });
         }
       } catch (e) {
-        console.warn("Failed posting quick status toggle, using local state:", e);
-      }
-
-      if (!saveSuccess) {
-        const clientSB = getClientSupabase();
-        if (clientSB) {
-          try {
-            const { error } = await clientSB.from("invoices").update(updatedRecord).eq("id", record.id);
-            if (error) {
-              console.error("Direct browser Supabase status toggle failed:", error.message);
-            } else {
-              console.log("Direct browser Supabase status toggle successful!");
-              saveSuccess = true;
-              setInvoices(prev => {
-                const list = prev.map(item => item.id === record.id ? updatedRecord : item);
-                localStorage.setItem("fde_finance_invoices", JSON.stringify(list));
-                return list;
-              });
-            }
-          } catch (sbErr) {
-            console.error("Direct browser Supabase status toggle exception:", sbErr);
-          }
-        }
+        console.warn("Failed posting quick status toggle proxy:", e);
       }
 
       if (!saveSuccess) {
