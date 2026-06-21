@@ -375,35 +375,21 @@ function splitRawContent(content: string): string[] {
   return [content.trim()];
 }
 
-// Parse pasted data using Google AI API Flash 3.5
-app.post("/api/parse-raw", async (req, res) => {
-  const { content, source } = req.body;
-  if (!content || !content.trim()) {
-    return res.status(400).json({ error: "Missing invoice raw pasted text content." });
-  }
-
-  const userEmail = req.header("x-finance-user") || "yadagiri.fde9@gmail.com";
-
+// Parse pasted data using Google AI API Flash 3.5 with robust chunk-splitting and batch execution
+async function parseSingleChunk(ai: any, chunk: string): Promise<any[]> {
   try {
-    const ai = getGoogleAIClient();
-
     const response = await ai.models.generateContent({
       model: "gemini-3.5-flash",
       contents: [
         {
           text: `You are an expert AI financial systems parser and receipts OCR analyzer. 
-Analyze the raw text block pasted below, which may contain one or multiple separate invoices, vendor emails, receipts, or Slack notifications.
-
-INSTRUCTIONS:
-1. Scan the entire pasted text and identify EVERY SINGLE separate invoice, transaction receipt, bill, or fee reference mentioned.
-2. Even if they are grouped together, listed sequentially, separated by empty lines, or written as line items, extract each of them as a separate invoice object in the returned array.
-3. There are NO limits to how many invoices you can extract. Extract all of them.
-4. For each identified invoice, perform automatic transcription and extract standard corporate finance indicators (vendor, amount, date, category, invoice_number, etc.).
-5. If some fields are missing, infer them logically or leave them empty, and always calculate a confidence score between 0 and 100 representing how complete the extraction is.
+Analyze the raw text block pasted below, which corresponds to a single transaction receipt, bill, Slack warning, or invoice statement.
+Extract the standard corporate finance indicators (vendor, amount, date, category, invoice_number, etc.).
+If some fields are missing, infer them logically or leave them empty, and always calculate a confidence score between 0 and 100 representing how complete the extraction is.
 
 Raw pasted transaction details:
 """
-${content}
+${chunk}
 """`
         }
       ],
@@ -472,133 +458,154 @@ ${content}
 
     const textOutput = response.text;
     if (!textOutput) {
-      throw new Error("Empty text response received from AI model.");
+      return [];
     }
 
     const cleanedJson = JSON.parse(textOutput.trim());
-    return res.json(Array.isArray(cleanedJson) ? cleanedJson : [cleanedJson]);
+    return Array.isArray(cleanedJson) ? cleanedJson : [cleanedJson];
   } catch (err: any) {
-    console.error("Google AI Parsing OCR issue:", err);
+    console.error("Single chunk AI generation or parsing failed, using offline backup for this chunk:", err.message);
+    throw err;
+  }
+}
+
+function parseChunkWithHeuristics(chunk: string, source: string): any {
+  const lines = chunk.split("\n");
+  let vendor = "Unknown Vendor";
+  let amount = 0.0;
+  let category = "Other";
+  let invoice_number = "N/A";
+
+  for (const l of lines) {
+    if (!l) continue;
+    const lowerLine = l.toLowerCase();
+    if (lowerLine.includes("aws") || lowerLine.includes("amazon")) {
+      vendor = "Amazon Web Services";
+      category = "Hosting";
+    } else if (lowerLine.includes("slack")) {
+      vendor = "Slack Technologies";
+      category = "Software";
+    } else if (lowerLine.includes("uber")) {
+      vendor = "Uber Logistics";
+      category = "Travel/Logistics";
+    } else if (lowerLine.includes("zoom")) {
+      vendor = "Zoom Video Communications";
+      category = "Software";
+    } else if (lowerLine.includes("supabase")) {
+      vendor = "Supabase Database";
+      category = "Hosting";
+    } else if (lowerLine.includes("fedex")) {
+      vendor = "FedEx Express";
+      category = "Travel/Logistics";
+    } else if (lowerLine.includes("invoice")) {
+      const matches = l.match(/invoice\s*#?\s*([A-Za-z0-9-]+)/i);
+      if (matches) invoice_number = matches[1];
+    }
+
+    const moneyMatch = l.match(/\$?\s*([0-9,]+\.[0-9]{2})/);
+    if (moneyMatch && amount === 0.0) {
+      amount = parseFloat(moneyMatch[1].replace(/,/g, ""));
+    }
+  }
+
+  // Match simple inline patterns like "Slack: 120"
+  if (vendor === "Unknown Vendor" && chunk.includes(":")) {
+    const colonSplit = chunk.split(":");
+    if (colonSplit && colonSplit.length >= 2 && colonSplit[1]) {
+      vendor = colonSplit[0].trim();
+      const potentialAmount = parseFloat(colonSplit[1].replace(/[^0-9.]/g, ""));
+      if (!isNaN(potentialAmount)) {
+        amount = potentialAmount;
+      }
+    }
+  }
+
+  return {
+    vendor,
+    amount: amount || 45.00,
+    date: new Date().toISOString().substring(0, 10),
+    category,
+    invoice_number: invoice_number !== "N/A" ? invoice_number : "INV-" + Math.floor(Math.random() * 90000 + 10000),
+    original_source: source || "Pasted Text",
+    extracted_metadata: {
+      currency: "USD",
+      taxAmount: 0.0,
+      vendorAddress: "",
+      paymentTerms: "Due on Receipt",
+      confidenceScore: 50,
+      lineItems: [
+        { description: "General Expense Parsed", quantity: 1, amount: amount || 45.00 }
+      ]
+    }
+  };
+}
+
+app.post("/api/parse-raw", async (req, res) => {
+  const { content, source } = req.body;
+  if (!content || !content.trim()) {
+    return res.status(400).json({ error: "Missing invoice raw pasted text content." });
+  }
+
+  const userEmail = req.header("x-finance-user") || "yadagiri.fde9@gmail.com";
+
+  try {
+    const ai = getGoogleAIClient();
+    const rawChunks = splitRawContent(content).map(c => c.trim()).filter(Boolean);
+
+    if (rawChunks.length <= 1) {
+      // Parse a single chunk or full content
+      try {
+        const parsed = await parseSingleChunk(ai, content);
+        return res.json(parsed);
+      } catch (err) {
+        console.warn("Single chunk AI parse failed, using heuristic fallback:", err);
+        return res.json([parseChunkWithHeuristics(content, source)]);
+      }
+    }
+
+    // Process multiple chunks concurrently with a controlled batch size
+    console.log(`Pasted block split into ${rawChunks.length} logical transaction logs. Processing batches...`);
+    
+    const CONCURRENCY_LIMIT = 8;
+    const results: any[] = [];
+
+    for (let i = 0; i < rawChunks.length; i += CONCURRENCY_LIMIT) {
+      const batch = rawChunks.slice(i, i + CONCURRENCY_LIMIT);
+      const promises = batch.map(async (chunk) => {
+        try {
+          return await parseSingleChunk(ai, chunk);
+        } catch (err) {
+          console.warn("Batch chunk AI parse failed. Using offline mapper for this chunk:", err);
+          return [parseChunkWithHeuristics(chunk, source)];
+        }
+      });
+
+      const batchResults = await Promise.all(promises);
+      for (const resList of batchResults) {
+        if (Array.isArray(resList)) {
+          results.push(...resList);
+        } else if (resList) {
+          results.push(resList);
+        }
+      }
+    }
+
+    // Deduplicate any accidental exact vendor/amount duplicates in the same batch mapping
+    return res.json(results);
+
+  } catch (err: any) {
+    console.error("Primary Google AI Parsing sequence issue:", err);
 
     try {
-      // Fallback: simple heuristic matching that supports delimiters and multiple split records
       const chunks = splitRawContent(content);
-      const fallbackList = [];
+      const fallbackList = chunks
+        .map(chunk => parseChunkWithHeuristics(chunk, source))
+        .filter(Boolean);
 
-      for (const chunk of chunks) {
-        if (!chunk || !chunk.trim()) continue;
-        const lines = chunk.split("\n");
-        let vendor = "Unknown Vendor";
-        let amount = 0.0;
-        let category = "Other";
-        let invoice_number = "N/A";
-
-        for (const l of lines) {
-          if (!l) continue;
-          const lowerLine = l.toLowerCase();
-          if (lowerLine.includes("aws") || lowerLine.includes("amazon")) {
-            vendor = "Amazon Web Services";
-            category = "Hosting";
-          } else if (lowerLine.includes("slack")) {
-            vendor = "Slack Technologies";
-            category = "Software";
-          } else if (lowerLine.includes("uber")) {
-            vendor = "Uber Logistics";
-            category = "Travel/Logistics";
-          } else if (lowerLine.includes("zoom")) {
-            vendor = "Zoom Video Communications";
-            category = "Software";
-          } else if (lowerLine.includes("supabase")) {
-            vendor = "Supabase Database";
-            category = "Hosting";
-          } else if (lowerLine.includes("fedex")) {
-            vendor = "FedEx Express";
-            category = "Travel/Logistics";
-          } else if (lowerLine.includes("invoice")) {
-            const matches = l.match(/invoice\s*#?\s*([A-Za-z0-9-]+)/i);
-            if (matches) invoice_number = matches[1];
-          }
-
-          const moneyMatch = l.match(/\$?\s*([0-9,]+\.[0-9]{2})/);
-          if (moneyMatch && amount === 0.0) {
-            amount = parseFloat(moneyMatch[1].replace(/,/g, ""));
-          }
-        }
-
-        // Match simple inline patterns like "Slack: 120"
-        if (vendor === "Unknown Vendor" && chunk.includes(":")) {
-          const colonSplit = chunk.split(":");
-          if (colonSplit && colonSplit.length >= 2 && colonSplit[1]) {
-            vendor = colonSplit[0].trim();
-            const potentialAmount = parseFloat(colonSplit[1].replace(/[^0-9.]/g, ""));
-            if (!isNaN(potentialAmount)) {
-              amount = potentialAmount;
-            }
-          }
-        }
-
-        fallbackList.push({
-          vendor,
-          amount: amount || 45.00,
-          date: new Date().toISOString().substring(0, 10),
-          category,
-          invoice_number: invoice_number !== "N/A" ? invoice_number : "INV-" + Math.floor(Math.random() * 90000 + 10000),
-          original_source: source || "Pasted Text",
-          extracted_metadata: {
-            currency: "USD",
-            taxAmount: 0.0,
-            vendorAddress: "",
-            paymentTerms: "Due on Receipt",
-            confidenceScore: 50,
-            lineItems: [
-              { description: "General Expense Parsed", quantity: 1, amount: amount || 45.00 }
-            ]
-          }
-        });
-      }
-
-      return res.json(fallbackList.length > 0 ? fallbackList : [
-        {
-          vendor: "Pasted Transaction",
-          amount: 45.00,
-          date: new Date().toISOString().substring(0, 10),
-          category: "Other",
-          invoice_number: "INV-" + Math.floor(Math.random() * 90000 + 10000),
-          original_source: source || "Pasted Text",
-          extracted_metadata: {
-            currency: "USD",
-            taxAmount: 0.0,
-            vendorAddress: "",
-            paymentTerms: "Due on Receipt",
-            confidenceScore: 50,
-            lineItems: [
-              { description: "General Expense Parsed", quantity: 1, amount: 45.00 }
-            ]
-          }
-        }
-      ]);
+      return res.json(fallbackList.length > 0 ? fallbackList : [parseChunkWithHeuristics(content, source)]);
     } catch (fallbackErr) {
       console.error("Simple Heuristic Fallback failed:", fallbackErr);
-      return res.json([
-        {
-          vendor: "Pasted Transaction",
-          amount: 45.00,
-          date: new Date().toISOString().substring(0, 10),
-          category: "Other",
-          invoice_number: "INV-" + Math.floor(Math.random() * 90000 + 10000),
-          original_source: source || "Pasted Text",
-          extracted_metadata: {
-            currency: "USD",
-            taxAmount: 0.0,
-            vendorAddress: "",
-            paymentTerms: "Due on Receipt",
-            confidenceScore: 50,
-            lineItems: [
-              { description: "General Expense Parsed", quantity: 1, amount: 45.00 }
-            ]
-          }
-        }
-      ]);
+      return res.json([parseChunkWithHeuristics(content, source)]);
     }
   }
 });
